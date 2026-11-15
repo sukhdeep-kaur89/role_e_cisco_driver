@@ -1,0 +1,77 @@
+PACKET TRACER LAB - show the same block by hand (for slides / demo)
+====================================================================
+Packet Tracer cannot run RESTCONF, so the Python driver cannot talk to it.
+Use this lab to SHOW what the driver does on a router, using CLI commands.
+
+Topology
+--------
+  [Attacker PC] 203.0.113.7 /24, gateway 203.0.113.1
+        |
+   Gi0/0 203.0.113.1/24  (outside)
+     [R1  - ISR 2911 router]
+   Gi0/1 192.168.10.1/24 (inside)
+        |
+     [Switch]--[Server 192.168.10.10 /24, gw 192.168.10.1]
+        |
+     [Normal PC 203.0.113.20 -> put on another outside switch port, gw 203.0.113.1]
+     (simplest: add a switch on the outside too, connect Attacker PC and Normal PC to it)
+
+1) Basic router setup
+---------------------
+enable
+configure terminal
+hostname R1
+interface GigabitEthernet0/0
+ ip address 203.0.113.1 255.255.255.0
+ no shutdown
+interface GigabitEthernet0/1
+ ip address 192.168.10.1 255.255.255.0
+ no shutdown
+end
+
+Test: both PCs can ping 192.168.10.10  (should succeed)
+
+2) Apply the block  (same rule the driver creates over RESTCONF)
+--------------------------------------------------------------
+configure terminal
+ip access-list extended BLOCKLIST
+ 10 deny ip host 203.0.113.7 any
+ 1000 permit ip any any
+exit
+interface GigabitEthernet0/0
+ ip access-group BLOCKLIST in
+end
+show access-lists
+
+Test: Attacker PC ping 192.168.10.10  -> fails (Destination host unreachable)
+      Normal PC   ping 192.168.10.10  -> still works  (because of line 1000)
+      show access-lists  -> match counters go up on line 10
+
+3) Rollback / expiry  (what the driver does when TTL ends)
+----------------------------------------------------------
+configure terminal
+ip access-list extended BLOCKLIST
+ no 10
+end
+show access-lists
+
+(If your Packet Tracer version rejects "no 10", use:  no deny ip host 203.0.113.7 any)
+Test: Attacker PC ping works again.
+
+4) Why line 1000 matters (good exam question)
+---------------------------------------------
+Every ACL ends with an invisible "deny ip any any".
+Without "1000 permit ip any any", blocking ONE attacker would block EVERYONE.
+
+Mapping CLI <-> RESTCONF JSON the driver sends
+----------------------------------------------
+ 10 deny ip host 203.0.113.7 any
+   = {"sequence": "10", "ace-rule": {"action": "deny", "protocol": "ip",
+                                     "host": "203.0.113.7", "dst-any": [null]}}
+ 1000 permit ip any any
+   = {"sequence": "1000", "ace-rule": {"action": "permit", "protocol": "ip",
+                                       "any": [null], "dst-any": [null]}}
+ no 10
+   = DELETE .../ip/access-list/extended=BLOCKLIST/access-list-seq-rule=10
+
+Screenshots to take: topology, show access-lists before/after, failed + successful pings.

@@ -1,0 +1,7 @@
+
+block(): n=50 mean=62.6ms p95=82.3ms max=250.4ms
+expire_due() removed 50 blocks in 2.20s
+.
+block() with slow router + 2 failures: 1.08s
+.
+2 passed in 7.01s
