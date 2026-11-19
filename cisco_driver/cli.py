@@ -8,6 +8,16 @@
     python -m cisco_driver expire                                 (run expiry once)
     python -m cisco_driver worker                                 (run expiry forever)
 
+v1.1:
+    python -m cisco_driver status 203.0.113.7 --device R1         (is it blocked? router + record)
+    python -m cisco_driver block-many 203.0.113.7 198.51.100.23 --device R1 --alert-id A-9
+    python -m cisco_driver extend 203.0.113.7 --device R1 --ttl 7200
+    python -m cisco_driver reconcile --device R1 [--fix]          (router vs record; repair)
+    python -m cisco_driver recover                                (resolve interrupted writes)
+    python -m cisco_driver rollback-alert A-9                     (undo a false-positive alert)
+    python -m cisco_driver rollback-all [--device R1] --yes       (emergency: remove all own blocks)
+    python -m cisco_driver backup [--out backups\\blocks.db]       (safe online copy of blocks.db)
+
 Settings come from environment variables - see config.py.
 Exit codes: 0 = ok, 1 = refused / router error, 2 = bad input or settings.
 """
@@ -18,6 +28,8 @@ import argparse
 import json
 import logging
 import sys
+import time
+from pathlib import Path
 from typing import List, Optional
 
 from .config import Settings
@@ -57,7 +69,46 @@ def build_parser() -> argparse.ArgumentParser:
 
     w = sub.add_parser("worker", help="keep removing expired blocks (Ctrl+C to stop)")
     w.add_argument("--interval", type=float, default=None)
+
+    # ---- v1.1
+    st = sub.add_parser("status", help="is this IP blocked? (router and record compared)")
+    st.add_argument("ip")
+    st.add_argument("--device", required=True)
+
+    bm = sub.add_parser("block-many", help="block several IPs from one alert")
+    bm.add_argument("ips", nargs="*", help="IPv4 hosts (or use --file)")
+    bm.add_argument("--file", help="text file with one IP per line (# comments allowed)")
+    bm.add_argument("--device", required=True)
+    bm.add_argument("--ttl", type=int, default=3600)
+    bm.add_argument("--reason", default="")
+    bm.add_argument("--alert-id", default="")
+
+    e = sub.add_parser("extend", help="keep an active block until at least now + TTL")
+    e.add_argument("ip")
+    e.add_argument("--device", required=True)
+    e.add_argument("--ttl", type=int, required=True, help="seconds from now")
+
+    rc = sub.add_parser("reconcile", help="compare router and record; --fix repairs drift")
+    rc.add_argument("--device", required=True)
+    rc.add_argument("--fix", action="store_true", help="re-apply lost driver rules, resolve interrupted writes")
+
+    sub.add_parser("recover", help="resolve writes interrupted by a crash or router failure")
+
+    ra = sub.add_parser("rollback-alert", help="remove every block created by one alert")
+    ra.add_argument("alert_id")
+
+    rall = sub.add_parser("rollback-all", help="emergency: remove ALL blocks this driver created")
+    rall.add_argument("--device", default=None, help="only this device (default: all devices)")
+    rall.add_argument("--yes", action="store_true", help="confirm; required")
+
+    bk = sub.add_parser("backup", help="consistent online copy of the block database")
+    bk.add_argument("--out", default=None, help="target file (default backups\\blocks-<time>.db)")
     return p
+
+
+def _read_ip_file(path: str) -> List[str]:
+    with open(path, encoding="utf-8") as fh:
+        return [line.split("#", 1)[0].strip() for line in fh if line.split("#", 1)[0].strip()]
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -105,7 +156,54 @@ def main(argv: Optional[List[str]] = None) -> int:
                     worker._stop.wait(3600)
             except KeyboardInterrupt:
                 worker.stop()
+                health = worker.health()
+                print(f"Stopped. runs={health['runs']} removed={health['removed']} "
+                      f"failed={health['failed']} recovered={health['recovered']}")
             return 0
+        # ---- v1.1
+        if args.command == "status":
+            _print(driver.status(args.ip, args.device))
+            return 0
+        if args.command == "block-many":
+            ips = list(args.ips) + (_read_ip_file(args.file) if args.file else [])
+            if not ips:
+                print("Invalid input: give at least one IP or --file", file=sys.stderr)
+                return 2
+            results = driver.block_many(ips, args.device, args.ttl, args.alert_id, args.reason)
+            _print([r.to_dict() for r in results])
+            return 0 if all(r.ok for r in results) else 1
+        if args.command == "extend":
+            result = driver.extend(args.ip, args.device, args.ttl)
+            _print(result.to_dict())
+            return 0 if result.status == "extended" else 1
+        if args.command == "reconcile":
+            report = driver.reconcile(args.device, fix=args.fix)
+            _print(report)
+            return 0 if report["ok"] else 1
+        if args.command == "recover":
+            results = driver.recover()
+            _print([r.to_dict() for r in results])
+            return 0 if all(r.ok for r in results) else 1
+        if args.command == "rollback-alert":
+            results = driver.unblock_alert(args.alert_id)
+            _print([r.to_dict() for r in results])
+            return 0 if all(r.ok for r in results) else 1
+        if args.command == "rollback-all":
+            if not args.yes:
+                print("Refusing to remove every block without --yes", file=sys.stderr)
+                return 2
+            results = driver.unblock_all(args.device)
+            _print([r.to_dict() for r in results])
+            return 0 if all(r.ok for r in results) else 1
+        if args.command == "backup":
+            out = args.out or str(Path("backups") / f"blocks-{time.strftime('%Y%m%d-%H%M%S')}.db")
+            try:
+                integrity, count = driver.store.backup(out)
+            except FileExistsError as exc:
+                print(f"Invalid input: {exc}", file=sys.stderr)
+                return 2
+            _print({"backup": out, "integrity_check": integrity, "records": count})
+            return 0 if integrity == "ok" else 1
     except ValidationError as exc:
         print(f"Invalid input: {exc}", file=sys.stderr)
         return 2

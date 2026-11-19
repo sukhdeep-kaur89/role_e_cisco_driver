@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from typing import Tuple
 
 # Device and ACL names: start with a letter, then letters, digits, _ . -
 # This stops path tricks such as "../" or "?" ending up inside RESTCONF URLs.
@@ -66,6 +67,31 @@ def validate_name(value: object, what: str) -> str:
             f"Invalid {what} name {value!r}: use letters, digits, '_', '.', '-' (max 64)"
         )
     return value
+
+
+def parse_networks(value: object) -> Tuple[ipaddress.IPv4Network, ...]:
+    """Parse the protected (never-block) list.
+
+    Accepts a comma/space separated string or an iterable of strings. Each entry is
+    one IPv4 host ("10.0.0.1") or network ("10.0.0.0/24"). Host bits are allowed
+    ("10.0.0.1/24" means 10.0.0.0/24) because this list only ever widens protection.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        items = [p for p in re.split(r"[,\s]+", value) if p]
+    else:
+        items = [str(p).strip() for p in value if str(p).strip()]  # type: ignore[union-attr]
+    networks = []
+    for item in items:
+        try:
+            net = ipaddress.ip_network(item, strict=False)
+        except ValueError:
+            raise ValidationError(f"Protected entry {item!r} is not an IPv4 address or network") from None
+        if net.version != 4:
+            raise ValidationError(f"Protected entry {item!r}: only IPv4 is supported")
+        networks.append(net)
+    return tuple(networks)
 
 
 def clean_text(value: object, max_length: int = 200) -> str:
